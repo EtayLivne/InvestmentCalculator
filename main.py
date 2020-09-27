@@ -1,8 +1,7 @@
 import yaml
-import random
-import matplotlib
-import matplotlib.pyplot as plt
 import numpy as np
+import matplotlib.pyplot as plt
+from dataclasses import dataclass
 
 ETF_NAME = "name"
 ETF_PROJECTED_GROWTH = "projected_growth"
@@ -13,63 +12,83 @@ STRATEGY_YEARLY_INVESTMENTS = "yearly_investments"
 STRATEGY_ETF_COMPONENTS = "etf_components"
 
 
-class InvestmentStrategy:
+class EtfPortfolioValidationError(Exception):
+    pass
 
+
+@dataclass(frozen=True, eq=True)
+class ETF:
+    name: str
+    projected_growth: float
+    holding_fee: float
+
+
+class EtfPortfolio:
     @staticmethod
-    def _init_etf_components(etf_components):
+    def _etf_portfolio_from_list(etf_components):
         return {c: 0 for c in etf_components}
 
+    @staticmethod
+    def _validate_input_types(etf_components):
+        if type(etf_components) not in (list, dict):
+            raise EtfPortfolioValidationError(f'An EtfPortfolio object cannot be instantiated from data of type {type(etf_components)}')
+
+    @staticmethod
+    def validate_portfolio_validity(portfolio):
+        for etf, weight in portfolio:
+            if type(etf) is not ETF:
+                raise EtfPortfolioValidationError(f'each element in an etf portfolio must belong to the {ETF.__class__} class')
+            if type(weight) not in (int, float):
+                raise EtfPortfolioValidationError(f'the weight of each element in an etf portfolio must be an int or float')
+
+        if sum(weight_in_portfolio for _, weight_in_portfolio in portfolio) != 1:
+            raise ValueError("weights in an etf portfolio must sum up to 1!")
+
+    def __init__(self, etf_components):
+        self._validate_input_types(etf_components)
+
+        self._portfolio_dict = etf_components if type(etf_components) is dict else self._etf_portfolio_from_list(etf_components)
+        self.validate_portfolio_validity(self)
+
+    def __iter__(self):
+        return iter(self._portfolio_dict.items())
+
+
+class InvestmentStrategy:
     def __init__(self, name, yearly_investments, etf_components):
         self.name = name
         self.yearly_investments = yearly_investments
-        if type(etf_components) is list:
-            self.etf_components = self._init_etf_components(etf_components)
-        elif type(etf_components) is dict:
-            self.etf_components = etf_components
-        else:
-            raise TypeError("etf components for investment strategy {} must be a list or dictionary".format(self.name))
+
+        try:
+            self.etf_portfolio = etf_components if type(etf_components) is EtfPortfolio else EtfPortfolio(etf_components)
+        except EtfPortfolioValidationError as ex:
+            raise EtfPortfolioValidationError(f'failed to create investment strategy {self.name} due to the following '\
+                                              f'validation error while attempting to initialize the associated '
+                                              f'portfolio: {str(ex)}')
 
         self.projected_growth = 0
         self._calc_projected_growth()
 
     def _calc_projected_growth(self):
         self.projected_growth = 1 + sum([(etf.projected_growth - etf.holding_fee) * weight for
-                                         etf, weight in self.etf_components.items()]) / 100
-        x = 9
+                                         etf, weight in self.etf_portfolio]) / 100
 
-    def project_assets(self, years, inflation_rate=0, only_gains=True):
-        if not self.yearly_investments:
-            raise(Exception("Cannot project assets for strategy {} since yearly investments list is empty".format(self.name)))
-
-        projected_assets = [self.yearly_investments[0]]
-        total_investment = projected_assets[0]
-        projected_gains = [0]
-
+    def project(self, years, inflation_rate=0, only_gains=True):
+        projected_assets_by_year = [self.yearly_investments[0]] + [0] * (years - 1)
+        projected_gains_by_year = [0] * years
         zero_padded_yearly_investments = list(self.yearly_investments) + max(0, years - len(self.yearly_investments)) * [0]
 
+        total_investment = projected_assets_by_year[0]
         for i in range(1, years):
-            yearly_investment = zero_padded_yearly_investments[i]
-            total_investment = total_investment + yearly_investment
-            yearly_gain = projected_assets[i-1] * (self.projected_growth - inflation_rate) + yearly_investment
+            invested_this_year = zero_padded_yearly_investments[i]
+            total_investment = total_investment + invested_this_year
+            total_assets = projected_assets_by_year[i-1] * (self.projected_growth - inflation_rate) + invested_this_year
 
-            projected_assets.append(yearly_gain)
-            projected_gains.append(projected_assets[i] - total_investment)
+            projected_assets_by_year[i] = total_assets
+            projected_gains_by_year[i] = projected_assets_by_year[i] - total_investment
 
-        return projected_gains if only_gains else projected_assets
+        return projected_gains_by_year if only_gains else projected_assets_by_year
 
-
-class ETF:
-    def __init__(self, name, projected_growth, holding_fee):
-        self.name = name
-        self.projected_growth = projected_growth
-        self.holding_fee = holding_fee
-
-    def __hash__(self):
-        random.seed(self.name)
-        return random.randint(0, 1000000)
-
-    def __eq__(self, other):
-        return self.name == other.name
 
 def line_style_iter():
     colors = ["b", "g", "r", "c", "m", "y", "k", "w"]
@@ -78,10 +97,11 @@ def line_style_iter():
         for color in colors:
             yield "{}{}".format(color, shape)
 
+
 def draw_chart(years, *strategies, inflation_rate=0, only_gains=True):
     time = np.arange(0, years, 1)
-    projections = [strategy.project_assets(years, inflation_rate=inflation_rate, only_gains=only_gains) for
-                        strategy in strategies]
+    projections = \
+        [strategy.project(years, inflation_rate=inflation_rate, only_gains=only_gains) for strategy in strategies]
     gain_text_component = "total yearly gains" if only_gains else "total assets worth"
     inflation_text_component = "inflation adjusted " if inflation_rate else ""
     y_label = inflation_text_component + gain_text_component
@@ -113,11 +133,13 @@ def from_yaml(path):
             print(exc)
     return yaml_input
 
+
 def init_etfs(etf_config):
     return {conf[ETF_NAME]: ETF(conf[ETF_NAME],
                                 conf[ETF_PROJECTED_GROWTH],
                                 conf[ETF_HOLDING_FEE])
             for conf in etf_config}
+
 
 def init_strategies(strategy_config, etfs):
     strategies = [s for s in strategy_config]
@@ -142,6 +164,7 @@ def main():
     etfs = init_etfs(conf["etfs"])
     strategies = init_strategies(conf["strategies"], etfs)
     draw_chart(43, *strategies, inflation_rate=0.02)
+
 
 if __name__ == "__main__":
     main()
